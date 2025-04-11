@@ -1,59 +1,8 @@
 ﻿  Main.cpp
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Sampling.h(54,16): warning C4305: 'return': truncation from 'double' to 'float'
+C:\GE\CW\RTBase\Sampling.h(54,16): warning C4305: 'return': truncation from 'double' to 'float'
   (compiling source file 'Main.cpp')
   
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Sampling.h(102,15): warning C4305: 'return': truncation from 'double' to 'float'
+C:\GE\CW\RTBase\Sampling.h(102,15): warning C4305: 'return': truncation from 'double' to 'float'
   (compiling source file 'Main.cpp')
   
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Imaging.h(212,23): warning C4018: '<': signed/unsigned mismatch
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Imaging.h(212,48): warning C4018: '<': signed/unsigned mismatch
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Imaging.h(220,21): warning C4018: '<': signed/unsigned mismatch
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(102,70): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(108,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(158,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(201,70): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(208,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(248,70): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(255,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(297,70): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(304,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(342,70): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(349,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(395,70): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Materials.h(402,59): warning C4305: 'argument': truncation from 'double' to 'const float'
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Lights.h(229,16): warning C4305: '+=': truncation from 'double' to 'float'
-  (compiling source file 'Main.cpp')
-  
-  RTBase.vcxproj -> C:\dev\WM9M3 Advanced Computer Graphics\CW\x64\Debug\RTBase.exe
+  RTBase.vcxproj -> C:\GE\CW\x64\Debug\RTBase.exe

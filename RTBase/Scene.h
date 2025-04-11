@@ -25,16 +25,10 @@ public:
 		inverseProjectionMatrix = ProjectionMatrix.invert();
 		width = (float)screenwidth;
 		height = (float)screenheight;
-		//float Wlens = (2.0f / ProjectionMatrix.a[1][1]);
-		float fovY = 2.0f * atanf(1.0f / ProjectionMatrix.a[1][1]);
+		float Wlens = (2.0f / ProjectionMatrix.a[1][1]);
 		float aspect = ProjectionMatrix.a[0][0] / ProjectionMatrix.a[1][1];
-		//float Hlens = Wlens * aspect;
-		//Afilm = Wlens * Hlens;
-
-		float Wfilm = 2.0f * tanf(fovY / 2.0f); 
-		float Hfilm = Wfilm / aspect;           
-
-		Afilm = Wfilm * Hfilm;
+		float Hlens = Wlens * aspect;
+		Afilm = Wlens * Hlens;
 	}
 	void updateView(Matrix V)
 	{
@@ -48,8 +42,6 @@ public:
 	// Add code here
 	Ray generateRay(float x, float y)
 	{
-		/*Vec3 dir(0, 0, 1);
-		return Ray(origin, dir);*/
 		float xprime = x / width;
 		float yprime = 1.0f - (y / height);
 		xprime = (xprime * 2.0f) - 1.0f;
@@ -59,6 +51,7 @@ public:
 		dir = camera.mulVec(dir);
 		dir = dir.normalize();
 		return Ray(origin, dir);
+
 	}
 	bool projectOntoCamera(const Vec3& p, float& x, float& y)
 	{
@@ -81,7 +74,6 @@ class Scene
 {
 public:
 	std::vector<Triangle> triangles;
-	std::vector<Triangle> bvhOutputTriangles;
 	std::vector<BSDF*> materials;
 	std::vector<Light*> lights;
 	Light* background = NULL;
@@ -89,15 +81,13 @@ public:
 	Camera camera;
 	AABB bounds;
 
-	
 
 	void build()
 	{
 		// Add BVH building code here
-		///////////////with BVH///////////////
 		bvh = new BVHNode();
-		bvh->build(triangles,bvhOutputTriangles);
-		///////////////////////////////////////
+		bvh->build(triangles);
+
 		// Do not touch the code below this line!
 		// Build light list
 		for (int i = 0; i < triangles.size(); i++)
@@ -113,7 +103,6 @@ public:
 	}
 	IntersectionData traverse(const Ray& ray)
 	{
-		///////////without BVH////////////////
 		/*IntersectionData intersection;
 		intersection.t = FLT_MAX;
 		for (int i = 0; i < triangles.size(); i++)
@@ -134,12 +123,11 @@ public:
 			}
 		}
 		return intersection;*/
-		///////////////////////////////////////////
-		return bvh->traverse(ray, bvhOutputTriangles);
+		return bvh->traverse(ray,triangles);
 	}
 	Light* sampleLight(Sampler* sampler, float& pmf)
 	{
-		//generate a random number in the range [0,1)
+		//r in the range[0, 1)
 		float r1 = sampler->next();
 		pmf = 1.0f / (float)lights.size();
 		return lights[std::min((int)(r1 * lights.size()), (int)(lights.size() - 1))];
@@ -164,17 +152,19 @@ public:
 			lights.push_back(background);
 		}
 	}
-	bool visible(const Vec3& p1, const Vec3& p2)
+	bool visible(const Vec3& p1, const Vec3& p2, const Triangle* ignoreTriangle)
 	{
 		Ray ray;
 		Vec3 dir = p2 - p1;
-		float maxT = dir.length() - (2.0f * EPSILON);
+		//float maxT = dir.length() - (2.0f * EPSILON);
+		float maxT = dir.length();
 		dir = dir.normalize();
 		ray.init(p1 + (dir * EPSILON), dir);
-		return bvh->traverseVisible(ray, triangles, maxT);
+		return bvh->traverseVisible(ray, triangles, maxT, ignoreTriangle);
 	}
 	Colour emit(Triangle* light, ShadingData shadingData, Vec3 wi)
 	{
+
 		return materials[light->materialIndex]->emit(shadingData, wi);
 	}
 	ShadingData calculateShadingData(IntersectionData intersection, Ray& ray)
@@ -200,7 +190,8 @@ public:
 			}
 			shadingData.frame.fromVector(shadingData.sNormal);
 			shadingData.t = intersection.t;
-		} else
+		}
+		else
 		{
 			shadingData.wo = -ray.dir;
 			shadingData.t = intersection.t;

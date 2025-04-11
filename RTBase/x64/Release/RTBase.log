@@ -1,16 +1,7 @@
 ﻿  Main.cpp
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Imaging.h(212,23): warning C4018: '<': signed/unsigned mismatch
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Imaging.h(212,48): warning C4018: '<': signed/unsigned mismatch
-  (compiling source file 'Main.cpp')
-  
-C:\dev\WM9M3 Advanced Computer Graphics\CW\RTBase\Imaging.h(221,21): warning C4018: '<': signed/unsigned mismatch
-  (compiling source file 'Main.cpp')
-  
   Generating code
-  2 of 2048 functions (<0.1%) were compiled, the rest were copied from previous compilation.
-    0 functions were new in current compilation
-    16 functions had inline decision re-evaluated but remain unchanged
+  1993 of 2014 functions (99.0%) were compiled, the rest were copied from previous compilation.
+    28 functions were new in current compilation
+    2 functions had inline decision re-evaluated but remain unchanged
   Finished generating code
-  RTBase.vcxproj -> C:\dev\WM9M3 Advanced Computer Graphics\CW\x64\Release\RTBase.exe
+  RTBase.vcxproj -> C:\ACG_CW\x64\Release\RTBase.exe

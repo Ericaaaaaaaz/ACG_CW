@@ -2,7 +2,7 @@
 <Project>
   <ProjectOutputs>
     <ProjectOutput>
-      <FullPath>C:\dev\WM9M3 Advanced Computer Graphics\CW\x64\Release\RTBase.exe</FullPath>
+      <FullPath>C:\ACG_CW\x64\Release\RTBase.exe</FullPath>
     </ProjectOutput>
   </ProjectOutputs>
   <ContentFiles />
