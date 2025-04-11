@@ -10,8 +10,19 @@
 #include "GamesEngineeringBase.h"
 #include <thread>
 #include <functional>
+#include <queue>
+#include <mutex>
 
 #define MAX_DEPTH 5
+
+struct Tile
+{
+	int startX;
+	int startY;
+	int width;
+	int height;
+};
+
 
 class RayTracer
 {
@@ -160,6 +171,7 @@ public:
 			return shadingData.bsdf->evaluate(shadingData, Vec3(0, 1, 0));
 		}
 		return scene->background->evaluate(r.dir);
+
 	}
 	Colour viewNormals(Ray& r)
 	{
@@ -171,7 +183,105 @@ public:
 		}
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
+
+	void renderTile(const Tile& tile,const BVHNode& bvh,const std::vector<Triangle>& triangles,std::vector<Colour>& framebuffer,const int imageWidth,const int imageHeight)
+	{
+		for (int y = tile.startY; y < tile.startY + tile.height; y++)
+		{
+			if (y >= imageHeight) break;
+			for (int x = tile.startX; x < tile.startX + tile.width; x++)
+			{
+				if (x >= imageWidth) 
+					break;
+
+				float px = x + 0.5f;
+				float py = y + 0.5f;
+				Ray ray = scene->camera.generateRay(px, py);
+				Colour throughput(1.0f, 1.0f, 1.0f);
+				Colour col = pathTrace(ray, throughput, 0, &samplers[0]);
+				framebuffer[y * imageWidth + x] = col;
+			}
+		}
+	}
+
 	void render()
+	{
+		film->incrementSPP();
+		int imageWidth = scene->camera.width;
+		int imageHeight = scene->camera.height;
+
+		int tileSize = 32;
+		int tilesX = (imageWidth + tileSize - 1) / tileSize;
+		int tilesY = (imageHeight + tileSize - 1) / tileSize;
+
+		std::vector<Tile> allTiles;
+		for (int ty = 0; ty < tilesY; ++ty)
+		{
+			for (int tx = 0; tx < tilesX; ++tx)
+			{
+				Tile tile{ tx * tileSize, ty * tileSize, tileSize, tileSize };
+				allTiles.push_back(tile);
+			}
+		}
+
+		std::queue<Tile> tileQueue;
+		for (auto& tile : allTiles) tileQueue.push(tile);
+
+        std::vector<Colour> framebuffer(imageWidth * imageHeight, Colour(0.0f, 0.0f, 0.0f));
+
+		std::vector<std::thread> threads;
+		std::mutex queueMutex;
+		std::condition_variable queueCV;
+		bool done = false;
+
+		auto workerFunc = [&](int threadIndex)
+			{
+				MTRandom* sampler = &samplers[threadIndex];
+				while (true)
+				{
+					Tile tile;
+					{
+						std::unique_lock<std::mutex> lock(queueMutex);
+						queueCV.wait(lock, [&] { return !tileQueue.empty() || done; });
+						if (tileQueue.empty() && done) return;
+						tile = tileQueue.front();
+						tileQueue.pop();
+					}
+					renderTile(tile, *scene->bvh, scene->triangles, framebuffer, imageWidth, imageHeight);
+				}
+			};
+
+		int threadCount = std::thread::hardware_concurrency();
+		for (int i = 0; i < threadCount; ++i)
+		{
+			threads.emplace_back(workerFunc, i);
+		}
+
+		{
+			std::unique_lock<std::mutex> lock(queueMutex);
+			done = true;
+		}
+		queueCV.notify_all();
+
+		for (auto& t : threads) t.join();
+
+		//push framebuffer to canvas and film
+		for (int y = 0; y < imageHeight; ++y)
+		{
+			for (int x = 0; x < imageWidth; ++x)
+			{
+				int index = y * imageWidth + x;
+				const Colour col = framebuffer[index];
+				film->splat(x + 0.5f, y + 0.5f, col);
+				unsigned char r = (unsigned char)(col.r * 255);
+				unsigned char g = (unsigned char)(col.g * 255);
+				unsigned char b = (unsigned char)(col.b * 255);
+				canvas->draw(x, y, r, g, b);
+			}
+		}
+	}
+	
+	/*void render()
 	{
 		film->incrementSPP();
 		for (unsigned int y = 0; y < film->height; y++)
@@ -194,7 +304,7 @@ public:
 				canvas->draw(x, y, r, g, b);
 			}
 		}
-	}
+	}*/
 	int getSPP()
 	{
 		return film->SPP;
