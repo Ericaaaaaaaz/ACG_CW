@@ -245,7 +245,7 @@ public:
 	
 		std::vector<bool> tileDone(allTiles.size(), false);
 
-		float varianceThreshold = 0.01f;
+		float varianceThreshold = 0.001f;
 		int   maxPasses = 10;  //maximum number of passes
 		int   samplesPerPass = 1; //number of new samples per pixel each pass
 
@@ -445,9 +445,9 @@ public:
 				int n = sampleCount[index];
 				if (n > 0)
 				{
-					Colour sum = accumulator[index];
+					Colour avg = accumulator[index]/(float)n;
 					//write to film
-					film->splat(x + 0.5f, y + 0.5f, sum);
+					film->splat(x + 0.5f, y + 0.5f, avg);
 
 					//write to canvas
 					/*unsigned char r = (unsigned char)(min(1.0f, sum.r) * 255);
@@ -455,7 +455,7 @@ public:
 					unsigned char b = (unsigned char)(min(1.0f, sum.b) * 255);
 					canvas->draw(x, y, r, g, b);*/
 					unsigned char r1, g1, b1;
-					film->tonemap(x, y, r1, g1, b1,1, film->SPP);
+					film->tonemap(x, y, r1, g1, b1,1, n);
 					canvas->draw(x, y, r1, g1, b1);
 				}
 			}
@@ -513,7 +513,8 @@ public:
 				unsigned char b1 = (unsigned char)(min(1.0f, b1) * 255);
 				canvas->draw(x, y, r1, g1, b1);*/
 				unsigned char r1, g1, b1;
-				film->tonemap(x, y, r1, g1, b1, 1,film->SPP);
+				int n = sampleCount[index];
+				film->tonemap(x, y, r1, g1, b1, 1,n);
 				canvas->draw(x, y, r1, g1, b1);
 			}
 		}
