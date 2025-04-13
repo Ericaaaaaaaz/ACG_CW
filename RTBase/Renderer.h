@@ -12,6 +12,7 @@
 #include <functional>
 #include <queue>
 #include <mutex>
+#include <OpenImageDenoise/oidn.hpp>
 
 #define MAX_DEPTH 5
 
@@ -53,6 +54,10 @@ public:
 
 	std::atomic<int> nextTile;
 	std::atomic<int> activeWorkers;
+
+	oidn::DeviceRef device;
+	oidn::BufferRef colourBuf;
+	oidn::FilterRef filter;
 
 	void init(Scene* _scene, GamesEngineeringBase::Window* _canvas)
 	{
@@ -309,8 +314,9 @@ public:
 
 								Ray ray = scene->camera.generateRay(px, py);
 								Colour throughput(1.0f, 1.0f, 1.0f);
-								Colour sampleColor = pathTrace(ray, throughput, 0, sampler);
-								tileAccum = tileAccum + sampleColor;
+								Colour sampleColour = pathTrace(ray, throughput, 0, sampler);
+								//Colour sampleColour = direct(ray, sampler);
+								tileAccum = tileAccum + sampleColour;
 							}
 
 							int index = y * imageWidth + x;
@@ -348,11 +354,9 @@ public:
 			}
 			if (allDone)
 			{
-				std::cout << "All tiles converged at pass " << pass << std::endl;
 				break;
 			}
 
-			std::cout << "Starting pass " << pass << std::endl;
 			int numTilesThisPass = 0;
 
 			//push any tile that isn't converged yet into the queue
@@ -441,19 +445,80 @@ public:
 				int n = sampleCount[index];
 				if (n > 0)
 				{
-					Colour avg = accumulator[index] / (float)n;
+					Colour sum = accumulator[index];
 					//write to film
-					film->splat(x + 0.5f, y + 0.5f, avg);
+					film->splat(x + 0.5f, y + 0.5f, sum);
 
 					//write to canvas
-					unsigned char r = (unsigned char)(min(1.0f, avg.r) * 255);
-					unsigned char g = (unsigned char)(min(1.0f, avg.g) * 255);
-					unsigned char b = (unsigned char)(min(1.0f, avg.b) * 255);
-					canvas->draw(x, y, r, g, b);
+					/*unsigned char r = (unsigned char)(min(1.0f, sum.r) * 255);
+					unsigned char g = (unsigned char)(min(1.0f, sum.g) * 255);
+					unsigned char b = (unsigned char)(min(1.0f, sum.b) * 255);
+					canvas->draw(x, y, r, g, b);*/
+					unsigned char r1, g1, b1;
+					film->tonemap(x, y, r1, g1, b1,1, film->SPP);
+					canvas->draw(x, y, r1, g1, b1);
 				}
 			}
 		}
 	}
+
+
+	void denoise()
+	{
+		int width = film->width;
+		int height = film->height;
+
+		device = oidn::newDevice();
+		device.commit();
+
+		colourBuf = device.newBuffer(width * height * 3 * sizeof(float));
+		float* colourData = (float*)colourBuf.getData();
+
+		//fill in the colour buffer with averaged values
+		for (int y = 0; y < height; ++y)
+		{
+			for (int x = 0; x < width; ++x)
+			{
+				int index = y * width + x;
+				int n = sampleCount[index];
+				Colour avg = (n > 0) ? accumulator[index] / (float)n : Colour(0.0f,0.0f,0.0f);
+				colourData[3 * index + 0] = avg.r;
+				colourData[3 * index + 1] = avg.g;
+				colourData[3 * index + 2] = avg.b;
+			}
+		}
+
+		filter = device.newFilter("RT");
+		filter.setImage("color", colourBuf, oidn::Format::Float3, width, height);
+		filter.setImage("output", colourBuf, oidn::Format::Float3, width, height);
+		filter.set("hdr", true);
+		filter.commit();
+		filter.execute();
+
+		//write denoised result back to film and canvas
+		for (int y = 0; y < height; ++y)
+		{
+			for (int x = 0; x < width; ++x)
+			{
+				int index = y * width + x;
+				float r = colourData[3 * index + 0];
+				float g = colourData[3 * index + 1];
+				float b = colourData[3 * index + 2];
+
+				Colour c(r, g, b);
+				film->splat(x + 0.5f, y + 0.5f, c);
+
+				/*unsigned char r1 = (unsigned char)(min(1.0f, r1) * 255);
+				unsigned char g1 = (unsigned char)(min(1.0f, g1) * 255);
+				unsigned char b1 = (unsigned char)(min(1.0f, b1) * 255);
+				canvas->draw(x, y, r1, g1, b1);*/
+				unsigned char r1, g1, b1;
+				film->tonemap(x, y, r1, g1, b1, 1,film->SPP);
+				canvas->draw(x, y, r1, g1, b1);
+			}
+		}
+	}
+
 
 
 	int getSPP()

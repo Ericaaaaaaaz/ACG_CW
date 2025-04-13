@@ -140,7 +140,7 @@ class BoxFilter : public ImageFilter
 public:
 	float filter(float x, float y) const
 	{
-		if (fabsf(x) < 0.5f && fabs(y) < 0.5f)
+		if (fabsf(x) <= 0.5f && fabs(y) <= 0.5f)
 		{
 			return 1.0f;
 		}
@@ -149,6 +149,40 @@ public:
 	int size() const
 	{
 		return 0;
+	}
+
+	//d:distance from the centre of the filter kernel
+	//radius: the size of the filter
+	//alpha: a parameter controlling the falloff(how quickly the weights decrease with distance)
+	float gaussianFilter(float x, float y, float radius, float alpha) const
+	{
+		float d = sqrtf(x * x + y * y);
+		return exp(-alpha * d * d) - exp(-alpha * radius * radius);
+	}
+
+	//usually B=1/3  C=1/3
+	float mitchellNetravaliFilter(float x, float y, float B, float C) const
+	{
+		float d = sqrtf(x * x + y * y);
+		float absD = fabsf(d);
+
+		if (absD >= 0.0f && absD < 1)
+		{
+			return ((12 - 9 * B - 6 * C) * absD * absD * absD +
+				(-18 + 12 * B + 6 * C) * absD * absD +
+				(6 - 2 * B)) / 6.0f;
+		}
+		if (absD >= 1 && absD < 2)
+		{
+			return ((-B - 6 * C) * absD * absD * absD +
+				(6 * B + 30 * C) * absD * absD +
+				(-12 * B - 48 * C) * absD +
+				(8 * B + 24 * C)) / 6.0f;
+		}
+		if (absD >= 2)
+		{
+			return 0;
+		}
 	}
 };
 
@@ -162,11 +196,80 @@ public:
 	ImageFilter* filter;
 	void splat(const float x, const float y, const Colour& L)
 	{
-		// Code to splat a smaple with colour L into the image plane using an ImageFilter
+		
+		float filterWeights[25];
+		unsigned int indices[25];
+		unsigned int used = 0;
+
+		float total = 0;
+		int size = filter->size();
+		for (int i = -size; i <= size; i++)
+		{
+			for (int j = -size; j <= size; j++)
+			{
+				int px = (int)x + j;
+				int py = (int)y + i;
+				if (px >= 0 && px < width && py >= 0 && py < height)
+				{
+					indices[used] = (py * width) + px;
+					filterWeights[used] = filter->filter(px - x, py - y);
+					total += filterWeights[used];
+					used++;
+				}
+			}
+		}
+		for (int i = 0; i < used; i++)
+		{
+			film[indices[i]] = film[indices[i]] + (L * filterWeights[i] / total);
+		}
+
 	}
-	void tonemap(int x, int y, unsigned char& r, unsigned char& g, unsigned char& b, float exposure = 1.0f)
+
+	void tonemap(int x, int y, unsigned char& r, unsigned char& g, unsigned char& b, float exposure = 1.0, int spp=1)
 	{
-		// Return a tonemapped pixel at coordinates x, y
+		if (spp == 0)
+		{
+			r = g = b = 0;
+			return;
+		}
+		Colour pixel = film[(y * width) + x] / float(spp);
+
+		//apply exposure
+		pixel = pixel * exposure;
+
+
+		auto tonemapFilmic = [](float x) -> float {
+			const float A = 0.15f;
+			const float B = 0.50f;
+			const float C = 0.10f;
+			const float D = 0.20f;
+			const float E = 0.02f;
+			const float F = 0.30f;
+			float numerator = (x * (A * x + C * B) + D * E);
+			float denominator = (x * (A * x + B) + D * F);
+			return std::max((numerator / denominator) - (E / F), 0.0f);
+			};
+
+	
+		pixel.r = tonemapFilmic(pixel.r);
+		pixel.g = tonemapFilmic(pixel.g);
+		pixel.b = tonemapFilmic(pixel.b);
+
+
+		const float W = 11.2f; 
+		float whiteScale = 1.0f / tonemapFilmic(W);
+		pixel = pixel * whiteScale;
+
+	
+		pixel.r = powf(std::max(pixel.r, 0.0f), 1.0f / 2.2f);
+		pixel.g = powf(std::max(pixel.g, 0.0f), 1.0f / 2.2f);
+		pixel.b = powf(std::max(pixel.b, 0.0f), 1.0f / 2.2f);
+
+	
+		r = static_cast<unsigned char>(std::min(pixel.r * 255.0f, 255.0f));
+		g = static_cast<unsigned char>(std::min(pixel.g * 255.0f, 255.0f));
+		b = static_cast<unsigned char>(std::min(pixel.b * 255.0f, 255.0f));
+	
 	}
 	// Do not change any code below this line
 	void init(int _width, int _height, ImageFilter* _filter)
@@ -187,6 +290,7 @@ public:
 		SPP++;
 	}
 	void save(std::string filename)
+
 	{
 		Colour* hdrpixels = new Colour[width * height];
 		for (unsigned int i = 0; i < (width * height); i++)
