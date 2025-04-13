@@ -536,6 +536,8 @@ public:
 		if (r) r->traverse(ray, triangles, intersection);
 	}
 
+
+
 	IntersectionData traverse(const Ray& ray, const std::vector<Triangle>& triangles)
 	{
 		IntersectionData intersection;

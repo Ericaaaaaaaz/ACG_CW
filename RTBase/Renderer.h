@@ -23,6 +23,18 @@ struct Tile
 	int height;
 };
 
+//check if pixel is converged
+bool isConverged(const Colour& sum, const Colour& sumSqr, int sampleCount, float threshold)
+{
+	if (sampleCount < 2) return false;
+
+	Colour mean = sum / (float)sampleCount;
+	Colour meanSqr = sumSqr / (float)sampleCount;
+	Colour var = meanSqr - (mean * mean);
+
+	float maxVar = max(var.r, max(var.g, var.b));
+	return (maxVar < threshold);
+}
 
 class RayTracer
 {
@@ -35,6 +47,12 @@ public:
 	int numProcs;
 	bool canHitLight = true;
 
+	std::vector<Colour> accumulator;
+	std::vector<Colour> accumulatorSqr;
+	std::vector<int>    sampleCount;
+
+	std::atomic<int> nextTile;
+	std::atomic<int> activeWorkers;
 
 	void init(Scene* _scene, GamesEngineeringBase::Window* _canvas)
 	{
@@ -48,10 +66,20 @@ public:
 		threads = new std::thread * [numProcs];
 		samplers = new MTRandom[numProcs];
 		clear();
+
+		int imageWidth = scene->camera.width;
+		int imageHeight = scene->camera.height;
+		accumulator.resize(imageWidth * imageHeight, Colour(0.0f, 0.0f, 0.0f));
+		accumulatorSqr.resize(imageWidth * imageHeight, Colour(0.0f, 0.0f, 0.0f));
+		sampleCount.resize(imageWidth * imageHeight, 0);
 	}
 	void clear()
 	{
 		film->clear();
+
+		std::fill(accumulator.begin(), accumulator.end(), Colour(0.0f, 0.0f, 0.0f));
+		std::fill(accumulatorSqr.begin(), accumulatorSqr.end(), Colour(0.0f, 0.0f, 0.0f));
+		std::fill(sampleCount.begin(), sampleCount.end(), 0);
 	}
 	Colour computeDirect(ShadingData shadingData, Sampler* sampler)
 	{
@@ -184,25 +212,7 @@ public:
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
 
-	void renderTile(const Tile& tile,const BVHNode& bvh,const std::vector<Triangle>& triangles,std::vector<Colour>& framebuffer,const int imageWidth,const int imageHeight)
-	{
-		for (int y = tile.startY; y < tile.startY + tile.height; y++)
-		{
-			if (y >= imageHeight) break;
-			for (int x = tile.startX; x < tile.startX + tile.width; x++)
-			{
-				if (x >= imageWidth) 
-					break;
-
-				float px = x + 0.5f;
-				float py = y + 0.5f;
-				Ray ray = scene->camera.generateRay(px, py);
-				Colour throughput(1.0f, 1.0f, 1.0f);
-				Colour col = pathTrace(ray, throughput, 0, &samplers[0]);
-				framebuffer[y * imageWidth + x] = col;
-			}
-		}
-	}
+	
 
 	void render()
 	{
@@ -210,11 +220,14 @@ public:
 		int imageWidth = scene->camera.width;
 		int imageHeight = scene->camera.height;
 
+		//tiling setup
 		int tileSize = 32;
 		int tilesX = (imageWidth + tileSize - 1) / tileSize;
 		int tilesY = (imageHeight + tileSize - 1) / tileSize;
 
+		//create a list of tiles
 		std::vector<Tile> allTiles;
+		allTiles.reserve(tilesX * tilesY);
 		for (int ty = 0; ty < tilesY; ++ty)
 		{
 			for (int tx = 0; tx < tilesX; ++tx)
@@ -224,87 +237,225 @@ public:
 			}
 		}
 
-		std::queue<Tile> tileQueue;
-		for (auto& tile : allTiles) tileQueue.push(tile);
+	
+		std::vector<bool> tileDone(allTiles.size(), false);
 
-        std::vector<Colour> framebuffer(imageWidth * imageHeight, Colour(0.0f, 0.0f, 0.0f));
+		float varianceThreshold = 0.01f;
+		int   maxPasses = 10;  //maximum number of passes
+		int   samplesPerPass = 1; //number of new samples per pixel each pass
 
-		std::vector<std::thread> threads;
+		std::queue<int> tileQueue;
+
+
 		std::mutex queueMutex;
 		std::condition_variable queueCV;
-		bool done = false;
+		bool stopThreads = false; 
+
+		std::atomic<int> tilesRemainingInPass(0);
+
+	
+		std::mutex passDoneMutex;
+		std::condition_variable passDoneCV;
+
 
 		auto workerFunc = [&](int threadIndex)
 			{
 				MTRandom* sampler = &samplers[threadIndex];
+
 				while (true)
 				{
-					Tile tile;
+					int tileIndex = -1;
 					{
+					
 						std::unique_lock<std::mutex> lock(queueMutex);
-						queueCV.wait(lock, [&] { return !tileQueue.empty() || done; });
-						if (tileQueue.empty() && done) return;
-						tile = tileQueue.front();
-						tileQueue.pop();
+				
+						queueCV.wait(lock, [&] {
+							return (stopThreads || !tileQueue.empty());
+							});
+
+						//if told to stop and no tiles left, exit the thread
+						if (stopThreads && tileQueue.empty())
+						{
+							return;
+						}
+
+						//if there is a tile in the queue, pop it
+						if (!tileQueue.empty())
+						{
+							tileIndex = tileQueue.front();
+							tileQueue.pop();
+						}
+						else
+						{
+							
+							continue;
+						}
+					} 
+
+					
+					Tile& tile = allTiles[tileIndex];
+					for (int y = tile.startY; y < tile.startY + tile.height; y++)
+					{
+						if (y >= imageHeight) break;
+						for (int x = tile.startX; x < tile.startX + tile.width; x++)
+						{
+							if (x >= imageWidth) break;
+
+							Colour tileAccum(0, 0, 0);
+							for (int s = 0; s < samplesPerPass; s++)
+							{
+								float px = x + sampler->next();
+								float py = y + sampler->next();
+
+								Ray ray = scene->camera.generateRay(px, py);
+								Colour throughput(1.0f, 1.0f, 1.0f);
+								Colour sampleColor = pathTrace(ray, throughput, 0, sampler);
+								tileAccum = tileAccum + sampleColor;
+							}
+
+							int index = y * imageWidth + x;
+							accumulator[index] = accumulator[index] + tileAccum;
+							accumulatorSqr[index] = accumulatorSqr[index] + tileAccum * tileAccum;
+							sampleCount[index] = sampleCount[index] + samplesPerPass;
+						}
 					}
-					renderTile(tile, *scene->bvh, scene->triangles, framebuffer, imageWidth, imageHeight);
-				}
+					int remaining = tilesRemainingInPass.fetch_sub(1) - 1;
+					if (remaining == 0)
+					{
+						std::unique_lock<std::mutex> lk(passDoneMutex);
+						passDoneCV.notify_one();
+					}
+				} 
 			};
 
+		
 		int threadCount = std::thread::hardware_concurrency();
+		std::vector<std::thread> threads;
+		threads.reserve(threadCount);
 		for (int i = 0; i < threadCount; ++i)
 		{
 			threads.emplace_back(workerFunc, i);
 		}
 
+		
+		for (int pass = 0; pass < maxPasses; pass++)
+		{
+			//check if everything is converged at the start
+			bool allDone = true;
+			for (auto done : tileDone)
+			{
+				if (!done) { allDone = false; break; }
+			}
+			if (allDone)
+			{
+				std::cout << "All tiles converged at pass " << pass << std::endl;
+				break;
+			}
+
+			std::cout << "Starting pass " << pass << std::endl;
+			int numTilesThisPass = 0;
+
+			//push any tile that isn't converged yet into the queue
+			{
+				std::unique_lock<std::mutex> lock(queueMutex);
+				for (int i = 0; i < (int)allTiles.size(); i++)
+				{
+					if (!tileDone[i])
+					{
+						tileQueue.push(i);
+						numTilesThisPass++;
+					}
+				}
+			}
+			if (numTilesThisPass == 0)
+			{
+				
+				break;
+			}
+
+			tilesRemainingInPass.store(numTilesThisPass);
+	
+			queueCV.notify_all();
+
+			{
+				std::unique_lock<std::mutex> lk(passDoneMutex);
+				passDoneCV.wait(lk, [&] {
+					return tilesRemainingInPass.load() == 0;
+					});
+			}
+		
+			if (pass % 2 == 0) //do variance check on even passes
+			{
+				//variance check
+				for (int i = 0; i < (int)allTiles.size(); i++)
+				{
+					if (tileDone[i])
+						continue;
+
+					Tile& tile = allTiles[i];
+					bool tileConverged = true;
+					for (int y = tile.startY; y < tile.startY + tile.height; y++)
+					{
+						if (y >= imageHeight) break;
+						for (int x = tile.startX; x < tile.startX + tile.width; x++)
+						{
+							if (x >= imageWidth) break;
+
+							int index = y * imageWidth + x;
+							if (!isConverged(accumulator[index],
+								accumulatorSqr[index],
+								sampleCount[index],
+								varianceThreshold))
+							{
+								tileConverged = false;
+								break;
+							}
+						}
+						if (!tileConverged) break;
+					}
+					tileDone[i] = tileConverged;
+				}
+
+			}
+		} 
+
 		{
 			std::unique_lock<std::mutex> lock(queueMutex);
-			done = true;
+			stopThreads = true;
 		}
 		queueCV.notify_all();
 
-		for (auto& t : threads) t.join();
-
-		//push framebuffer to canvas and film
-		for (int y = 0; y < imageHeight; ++y)
+		for (auto& t : threads)
 		{
-			for (int x = 0; x < imageWidth; ++x)
+			t.join();
+		}
+
+	
+		int imageWidthFinal = scene->camera.width;
+		int imageHeightFinal = scene->camera.height;
+		for (int y = 0; y < imageHeightFinal; ++y)
+		{
+			for (int x = 0; x < imageWidthFinal; ++x)
 			{
-				int index = y * imageWidth + x;
-				const Colour col = framebuffer[index];
-				film->splat(x + 0.5f, y + 0.5f, col);
-				unsigned char r = (unsigned char)(col.r * 255);
-				unsigned char g = (unsigned char)(col.g * 255);
-				unsigned char b = (unsigned char)(col.b * 255);
-				canvas->draw(x, y, r, g, b);
+				int index = y * imageWidthFinal + x;
+				int n = sampleCount[index];
+				if (n > 0)
+				{
+					Colour avg = accumulator[index] / (float)n;
+					//write to film
+					film->splat(x + 0.5f, y + 0.5f, avg);
+
+					//write to canvas
+					unsigned char r = (unsigned char)(min(1.0f, avg.r) * 255);
+					unsigned char g = (unsigned char)(min(1.0f, avg.g) * 255);
+					unsigned char b = (unsigned char)(min(1.0f, avg.b) * 255);
+					canvas->draw(x, y, r, g, b);
+				}
 			}
 		}
 	}
-	
-	/*void render()
-	{
-		film->incrementSPP();
-		for (unsigned int y = 0; y < film->height; y++)
-		{
-			for (unsigned int x = 0; x < film->width; x++)
-			{
-				float px = x + 0.5f;
-				float py = y + 0.5f;
-				Ray ray = scene->camera.generateRay(px, py);
-				//Colour col = viewNormals(ray);
-				//Colour col = albedo(ray);
-				//Colour col = direct(ray, &samplers[0]);
-				Colour throughput(1.0f, 1.0f, 1.0f);
-				Colour col = pathTrace(ray, throughput, 0, &samplers[0]);
-				
-				film->splat(px, py, col);
-				unsigned char r = (unsigned char)(col.r * 255);
-				unsigned char g = (unsigned char)(col.g * 255);
-				unsigned char b = (unsigned char)(col.b * 255);
-				canvas->draw(x, y, r, g, b);
-			}
-		}
-	}*/
+
+
 	int getSPP()
 	{
 		return film->SPP;
