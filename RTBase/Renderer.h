@@ -86,6 +86,17 @@ public:
 		std::fill(accumulatorSqr.begin(), accumulatorSqr.end(), Colour(0.0f, 0.0f, 0.0f));
 		std::fill(sampleCount.begin(), sampleCount.end(), 0);
 	}
+
+	//to clamp very bright values to prevent bright spots
+	Colour clampMax(const Colour& c, float maxValue = 20.0f)
+	{
+		return Colour(
+			min(c.r, maxValue),
+			min(c.g, maxValue),
+			min(c.b, maxValue)
+		);
+	}
+
 	Colour computeDirect(ShadingData shadingData, Sampler* sampler)
 	{
 		if (shadingData.bsdf->isPureSpecular() == true)
@@ -98,41 +109,60 @@ public:
 		// Sample a point on the light
 		float pdf;
 		Colour emitted;
+
+		float pdfLight;
 		Vec3 p = light->sample(shadingData, sampler, emitted, pdf);
+
+
+		if (!light || pmf < EPSILON)
+			return Colour(0.0f, 0.0f, 0.0f);
+
+		if (pdf <= EPSILON)
+			return Colour(0.0f, 0.0f, 0.0f);
+
+		Vec3 wi;
+		float GTerm = 0.0f;
+
 		if (light->isArea())
 		{
-			// Calculate GTerm
-			Vec3 wi = p - shadingData.x;
+			wi = p - shadingData.x;
 			float l = wi.lengthSq();
+
+			if (l < EPSILON)
+				return Colour(0.0f, 0.0f, 0.0f);
+
 			wi = wi.normalize();
-			float GTerm = (max(Dot(wi, shadingData.sNormal), 0.0f) * max(-Dot(wi, light->normal(shadingData, wi)), 0.0f)) / l;
+			float GTerm = (max(Dot(wi, shadingData.sNormal), 0.0f) * max(Dot(-wi, light->normal(shadingData, wi)), 0.0f)) / l;
+
 			if (GTerm > 0)
 			{
 				// Trace
-				if (scene->visible(shadingData.x, p, static_cast<AreaLight*>(light)->triangle))
+				if (scene->visible(shadingData.x + wi * EPSILON, p - wi * EPSILON, static_cast<AreaLight*>(light)->triangle))
 				{
 					// Shade
-					return shadingData.bsdf->evaluate(shadingData, wi) * emitted * GTerm / (pmf * pdf);
+					return clampMax(shadingData.bsdf->evaluate(shadingData, wi) * emitted * GTerm / (pmf * pdf));
 				}
 			}
+			pdfLight = pdf * pmf;
 		}
 		else
 		{
-			// Calculate GTerm
-			Vec3 wi = p;
-			float GTerm = max(Dot(wi, shadingData.sNormal), 0.0f);
+			wi = p;
+			GTerm = max(Dot(wi, shadingData.sNormal), 0.0f);
 			if (GTerm > 0)
 			{
 				// Trace
-				if (scene->visible(shadingData.x, shadingData.x + (p * 10000.0f), nullptr))
+				if (scene->visible(shadingData.x + wi * EPSILON, shadingData.x + (wi * 10000.0f), nullptr))
 				{
 					// Shade
-					return shadingData.bsdf->evaluate(shadingData, wi) * emitted * GTerm / (pmf * pdf);
+					return clampMax(shadingData.bsdf->evaluate(shadingData, wi) * emitted * GTerm / (pmf * pdf));
 				}
 			}
+			pdfLight = pdf * pmf;
 		}
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
+
 	Colour pathTrace(Ray& r, Colour& pathThroughput, int depth, Sampler* sampler)
 	{
 		IntersectionData intersection = scene->traverse(r);
@@ -151,11 +181,14 @@ public:
 				}
 			}
 			Colour direct = pathThroughput * computeDirect(shadingData, sampler);
+
 			if (depth > MAX_DEPTH)
 			{
 				return direct;
 			}
+
 			float russianRouletteProbability = min(pathThroughput.Lum(), 0.9f);
+
 			if (sampler->next() < russianRouletteProbability)
 			{
 				pathThroughput = pathThroughput / russianRouletteProbability;
@@ -168,9 +201,19 @@ public:
 			float pdf;
 			Vec3 wi = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
 			pdf = SamplingDistributions::cosineHemispherePDF(wi);
+
 			wi = shadingData.frame.toWorld(wi);
+
 			bsdf = shadingData.bsdf->evaluate(shadingData, wi);
+
+			if (pdf < EPSILON || bsdf.Lum() < EPSILON)
+			{
+				return direct;
+			}
+
 			pathThroughput = pathThroughput * bsdf * fabsf(Dot(wi, shadingData.sNormal)) / pdf;
+
+
 			r.init(shadingData.x + (wi * EPSILON), wi);
 			return (direct + pathTrace(r, pathThroughput, depth + 1, sampler));
 		}
@@ -217,7 +260,7 @@ public:
 		return Colour(0.0f, 0.0f, 0.0f);
 	}
 
-	
+
 
 	void render()
 	{
@@ -242,7 +285,7 @@ public:
 			}
 		}
 
-	
+
 		std::vector<bool> tileDone(allTiles.size(), false);
 
 		float varianceThreshold = 0.001f;
@@ -252,13 +295,14 @@ public:
 		std::queue<int> tileQueue;
 
 
+
 		std::mutex queueMutex;
 		std::condition_variable queueCV;
-		bool stopThreads = false; 
+		bool stopThreads = false;
 
 		std::atomic<int> tilesRemainingInPass(0);
 
-	
+
 		std::mutex passDoneMutex;
 		std::condition_variable passDoneCV;
 
@@ -271,9 +315,9 @@ public:
 				{
 					int tileIndex = -1;
 					{
-					
+
 						std::unique_lock<std::mutex> lock(queueMutex);
-				
+
 						queueCV.wait(lock, [&] {
 							return (stopThreads || !tileQueue.empty());
 							});
@@ -292,12 +336,12 @@ public:
 						}
 						else
 						{
-							
+
 							continue;
 						}
-					} 
+					}
 
-					
+
 					Tile& tile = allTiles[tileIndex];
 					for (int y = tile.startY; y < tile.startY + tile.height; y++)
 					{
@@ -331,10 +375,10 @@ public:
 						std::unique_lock<std::mutex> lk(passDoneMutex);
 						passDoneCV.notify_one();
 					}
-				} 
+				}
 			};
 
-		
+
 		int threadCount = std::thread::hardware_concurrency();
 		std::vector<std::thread> threads;
 		threads.reserve(threadCount);
@@ -343,7 +387,7 @@ public:
 			threads.emplace_back(workerFunc, i);
 		}
 
-		
+
 		for (int pass = 0; pass < maxPasses; pass++)
 		{
 			//check if everything is converged at the start
@@ -373,12 +417,12 @@ public:
 			}
 			if (numTilesThisPass == 0)
 			{
-				
+
 				break;
 			}
 
 			tilesRemainingInPass.store(numTilesThisPass);
-	
+
 			queueCV.notify_all();
 
 			{
@@ -387,7 +431,7 @@ public:
 					return tilesRemainingInPass.load() == 0;
 					});
 			}
-		
+
 			if (pass % 2 == 0) //do variance check on even passes
 			{
 				//variance check
@@ -421,7 +465,7 @@ public:
 				}
 
 			}
-		} 
+		}
 
 		{
 			std::unique_lock<std::mutex> lock(queueMutex);
@@ -434,7 +478,7 @@ public:
 			t.join();
 		}
 
-	
+
 		int imageWidthFinal = scene->camera.width;
 		int imageHeightFinal = scene->camera.height;
 		for (int y = 0; y < imageHeightFinal; ++y)
@@ -445,7 +489,7 @@ public:
 				int n = sampleCount[index];
 				if (n > 0)
 				{
-					Colour avg = accumulator[index]/(float)n;
+					Colour avg = accumulator[index] / (float)n;
 					//write to film
 					film->splat(x + 0.5f, y + 0.5f, avg);
 
@@ -455,7 +499,7 @@ public:
 					unsigned char b = (unsigned char)(min(1.0f, sum.b) * 255);
 					canvas->draw(x, y, r, g, b);*/
 					unsigned char r1, g1, b1;
-					film->tonemap(x, y, r1, g1, b1,1, n);
+					film->tonemap(x, y, r1, g1, b1, 1, n);
 					canvas->draw(x, y, r1, g1, b1);
 				}
 			}
@@ -481,7 +525,7 @@ public:
 			{
 				int index = y * width + x;
 				int n = sampleCount[index];
-				Colour avg = (n > 0) ? accumulator[index] / (float)n : Colour(0.0f,0.0f,0.0f);
+				Colour avg = (n > 0) ? accumulator[index] / (float)n : Colour(0.0f, 0.0f, 0.0f);
 				colourData[3 * index + 0] = avg.r;
 				colourData[3 * index + 1] = avg.g;
 				colourData[3 * index + 2] = avg.b;
@@ -514,7 +558,7 @@ public:
 				canvas->draw(x, y, r1, g1, b1);*/
 				unsigned char r1, g1, b1;
 				int n = sampleCount[index];
-				film->tonemap(x, y, r1, g1, b1, 1,n);
+				film->tonemap(x, y, r1, g1, b1, 1, n);
 				canvas->draw(x, y, r1, g1, b1);
 			}
 		}
