@@ -309,7 +309,6 @@ public:
 
 
 		Colour pathThroughput = Le / (pmf * pdfPosition * pdfDirection);
-		Colour finalColour(0.0f, 0.0f, 0.0f);
 
 
 		Triangle* ignoreTri = nullptr;
@@ -349,7 +348,7 @@ public:
 			//connect to camera at each valid intersection
 			Vec3 camPos = scene->camera.origin;
 			Vec3 toCam = (camPos - shadingData.x).normalize();
-			float cosTheta = max(0.0f, -Dot(toCam, shadingData.sNormal));
+			float cosTheta = max(0.0f, Dot(toCam, shadingData.sNormal));
 
 			if (cosTheta > EPSILON)
 			{
@@ -380,7 +379,7 @@ public:
 			if (bsdfVal.Lum() < EPSILON)
 				break;
 
-			float cosTerm = max(0.0f, -Dot(newDirection, shadingData.sNormal));
+			float cosTerm = max(0.0f, Dot(newDirection, shadingData.sNormal));
 
 			pathThroughput = pathThroughput * bsdfVal * cosTerm / newDirPdf;
 
@@ -395,7 +394,7 @@ public:
 			ray.init(shadingData.x + newDirection * EPSILON, newDirection);
 		}
 
-		return finalColour;
+		return Colour(1.0f, 1.0f, 1.0f);
 
 	}
 
@@ -702,7 +701,7 @@ void renderLightTracing()
 	film->incrementSPP();
 
 	//number of light paths to trace - should match the resolution
-	int numLightPaths = scene->camera.width * scene->camera.height * 16; 
+	int numLightPaths = scene->camera.width * scene->camera.height * 20; 
 
 	float invPaths = 1.0f / float(numLightPaths);
 
@@ -739,8 +738,6 @@ void renderLightTracing()
 	int imageWidth = scene->camera.width;
 	int imageHeight = scene->camera.height;
 
-	
-
 
 	for (int y = 0; y < imageHeight; ++y) 
 	{
@@ -749,17 +746,22 @@ void renderLightTracing()
 			int index = y * imageWidth + x;
 			int n = sampleCount[index];
 
-			
-			//Colour avg = accumulator[index] * invPaths;
-			Colour avg = (n > 0) ? (accumulator[index] / float(n)) : Colour(0.0f, 0.0f, 0.0f);
 
-			film->splat(x + 0.5f, y + 0.5f, avg);
+			if (n > 0)
+			{
+				Colour avg = accumulator[index] / float(n);
 
-			unsigned char r, g, b;
-		
-			film->tonemap(x, y, r, g, b, 1.0f, sampleCount[index]);
-			canvas->draw(x, y, r, g, b);
-			
+				film->splat(x + 0.5f, y + 0.5f, avg);
+
+				unsigned char r, g, b;
+				film->tonemap(x, y, r, g, b, 1.0f, 1);
+				canvas->draw(x, y, r, g, b);
+			}
+			else
+			{
+
+				canvas->draw(x, y, 0, 0, 0);
+			}
 
 			
 		}
