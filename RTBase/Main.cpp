@@ -108,9 +108,9 @@ int main(int argc, char *argv[])
 		}
 		// Time how long a render call takes
 		timer.reset();
-		//rt.renderPathTracing();
-		rt.renderLightTracing();
-		//rt.denoise();
+		rt.renderPathTracing();
+		//rt.renderLightTracing();
+		rt.denoise();
 
 		float t = timer.dt();
 		// Write

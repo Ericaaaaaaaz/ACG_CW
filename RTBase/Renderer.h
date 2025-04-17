@@ -199,12 +199,14 @@ public:
 			}
 			Colour bsdf;
 			float pdf;
-			Vec3 wi = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
+			/*Vec3 wi = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
 			pdf = SamplingDistributions::cosineHemispherePDF(wi);
 
 			wi = shadingData.frame.toWorld(wi);
 
-			bsdf = shadingData.bsdf->evaluate(shadingData, wi);
+			bsdf = shadingData.bsdf->evaluate(shadingData, wi);*/
+			Vec3 wi = shadingData.bsdf->sample(shadingData, sampler, bsdf, pdf);
+
 
 			if (pdf < EPSILON || bsdf.Lum() < EPSILON)
 			{
