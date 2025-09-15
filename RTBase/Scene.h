@@ -6,6 +6,7 @@
 #include "Imaging.h"
 #include "Materials.h"
 #include "Lights.h"
+#include <unordered_map>
 
 class Camera
 {
@@ -70,6 +71,74 @@ public:
 	}
 };
 
+static void computeSmoothNormals(std::vector<Triangle>& tris, float posEps = 1e-6f)
+{
+	struct Key 
+	{
+		int64_t x, y, z;
+		bool operator==(const Key& o) const { return x == o.x && y == o.y && z == o.z; }
+	};
+	struct H 
+	{
+		size_t operator()(const Key& k) const 
+		{
+			//64-bit mix
+			size_t h = 1469598103934665603ull;
+			auto mix = [&](int64_t v) 
+				{ 
+					h ^= (size_t)v; h *= 1099511628211ull; 
+				};
+			mix(k.x); mix(k.y); mix(k.z); 
+			return h;
+		}
+	};
+	auto quant = [&](const Vec3& p)->Key 
+		{
+			const double s = 1.0 / posEps;
+			return { (int64_t)llround(p.x * s), (int64_t)llround(p.y * s), (int64_t)llround(p.z * s) };
+		};
+
+	//accumulate face normals per position
+	std::unordered_map<Key, Vec3, H> acc;
+	std::unordered_map<Key, int, H> cnt;
+
+	for (const Triangle& t : tris) 
+	{
+		Vec3 e1 = t.vertices[1].p - t.vertices[0].p;
+		Vec3 e2 = t.vertices[2].p - t.vertices[0].p;
+		Vec3 faceN = e1.cross(e2); 
+
+		for (int i = 0; i < 3; ++i) 
+		{
+			Key k = quant(t.vertices[i].p);
+			acc[k] = acc[k] + faceN;
+			cnt[k] += 1;
+		}
+	}
+
+	//write back normalized smooth normals
+	for (Triangle& t : tris)
+	{
+		for (int i = 0; i < 3; ++i) 
+		{
+			Key k = quant(t.vertices[i].p);
+			Vec3 n = acc[k];
+			if (n.lengthSq() > 0.0f) 
+				n = n.normalize();
+
+			if (Dot(n, t.n) < 0.0f) 
+				n = -n;
+
+			t.vertices[i].normal = n;
+		}
+
+		//recompute geometric normal as well (keeps t.n consistent)
+		Vec3 e1 = t.vertices[1].p - t.vertices[0].p;
+		Vec3 e2 = t.vertices[2].p - t.vertices[0].p;
+		t.n = e1.cross(e2).normalize();
+	}
+}
+
 class Scene
 {
 public:
@@ -84,6 +153,8 @@ public:
 
 	void build()
 	{
+		computeSmoothNormals(triangles);
+
 		// Add BVH building code here
 		bvh = new BVHNode();
 		bvh->build(triangles);
@@ -103,26 +174,6 @@ public:
 	}
 	IntersectionData traverse(const Ray& ray)
 	{
-		/*IntersectionData intersection;
-		intersection.t = FLT_MAX;
-		for (int i = 0; i < triangles.size(); i++)
-		{
-			float t;
-			float u;
-			float v;
-			if (triangles[i].rayIntersect(ray, t, u, v))
-			{
-				if (t < intersection.t)
-				{
-					intersection.t = t;
-					intersection.ID = i;
-					intersection.alpha = u;
-					intersection.beta = v;
-					intersection.gamma = 1.0f - (u + v);
-				}
-			}
-		}
-		return intersection;*/
 		return bvh->traverse(ray,triangles);
 	}
 	Light* sampleLight(Sampler* sampler, float& pmf)
@@ -152,11 +203,10 @@ public:
 			lights.push_back(background);
 		}
 	}
-	bool visible(const Vec3& p1, const Vec3& p2, const Triangle* ignoreTriangle)
+	bool visible(const Vec3& p1, const Vec3& p2, const Triangle* ignoreTriangle) const
 	{
 		Ray ray;
 		Vec3 dir = p2 - p1;
-		//float maxT = dir.length() - (2.0f * EPSILON);
 		float maxT = dir.length();
 		dir = dir.normalize();
 		ray.init(p1 + (dir * EPSILON), dir);

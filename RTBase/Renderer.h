@@ -24,6 +24,15 @@ struct Tile
 	int height;
 };
 
+struct VPL
+{
+	ShadingData shadingData;
+	Colour      Le;
+	bool        onLight;
+	const Triangle* tri = nullptr;
+};
+
+
 //check if pixel is converged
 bool isConverged(const Colour& sum, const Colour& sumSqr, int sampleCount, float threshold)
 {
@@ -47,10 +56,13 @@ public:
 	std::thread** threads;
 	int numProcs;
 	bool canHitLight = true;
+	int lastNumLightPaths = 0;
 
 	std::vector<Colour> accumulator;
 	std::vector<Colour> accumulatorSqr;
 	std::vector<int>    sampleCount;
+
+	std::mutex accumMutex;
 
 	std::atomic<int> nextTile;
 	std::atomic<int> activeWorkers;
@@ -58,6 +70,8 @@ public:
 	oidn::DeviceRef device;
 	oidn::BufferRef colourBuf;
 	oidn::FilterRef filter;
+
+	std::vector<VPL> vpls;
 
 	void init(Scene* _scene, GamesEngineeringBase::Window* _canvas)
 	{
@@ -87,14 +101,36 @@ public:
 		std::fill(sampleCount.begin(), sampleCount.end(), 0);
 	}
 
+	bool firstNonSpecularHit(Ray r, Sampler* sampler, ShadingData& outSD) 
+	{
+		for (int depth = 0; depth <= MAX_DEPTH; ++depth) 
+		{
+			IntersectionData isect = scene->traverse(r);
+			ShadingData sd = scene->calculateShadingData(isect, r);
+
+			if (sd.t >= FLT_MAX) return false;        
+
+			if (!sd.bsdf->isPureSpecular()) 
+			{
+				outSD = sd;
+				return true;                         
+			}
+
+			//otherwise bounce specularly
+			Colour f; float pdf;
+			Vec3 wi = sd.bsdf->sample(sd, sampler, f, pdf);
+			if (pdf < EPSILON) 
+				return false;
+
+			r.init(sd.x + wi * EPSILON, wi);
+		}
+		return false;
+	}
+
 	//to clamp very bright values to prevent bright spots
 	Colour clampMax(const Colour& c, float maxValue = 20.0f)
 	{
-		return Colour(
-			min(c.r, maxValue),
-			min(c.g, maxValue),
-			min(c.b, maxValue)
-		);
+		return Colour(min(c.r, maxValue),min(c.g, maxValue),min(c.b, maxValue));
 	}
 
 	Colour computeDirect(ShadingData shadingData, Sampler* sampler)
@@ -132,7 +168,7 @@ public:
 				return Colour(0.0f, 0.0f, 0.0f);
 
 			wi = wi.normalize();
-			float GTerm = (max(Dot(wi, shadingData.sNormal), 0.0f) * max(Dot(-wi, light->normal(shadingData, wi)), 0.0f)) / l;
+			GTerm = (max(Dot(wi, shadingData.sNormal), 0.0f) * max(Dot(-wi, light->normal(shadingData, wi)), 0.0f)) / l;
 
 			if (GTerm > 0)
 			{
@@ -199,12 +235,6 @@ public:
 			}
 			Colour bsdf;
 			float pdf;
-			/*Vec3 wi = SamplingDistributions::cosineSampleHemisphere(sampler->next(), sampler->next());
-			pdf = SamplingDistributions::cosineHemispherePDF(wi);
-
-			wi = shadingData.frame.toWorld(wi);
-
-			bsdf = shadingData.bsdf->evaluate(shadingData, wi);*/
 			Vec3 wi = shadingData.bsdf->sample(shadingData, sampler, bsdf, pdf);
 
 
@@ -222,238 +252,20 @@ public:
 		return scene->background->evaluate(r.dir);
 	}
 
-	void connectToCamera(Vec3 p, Vec3 n, Colour col, Triangle* ignoreTri = nullptr)
+	Colour direct(Ray& r, Sampler* sampler)
 	{
-		float px, py;
-		if (!scene->camera.projectOntoCamera(p, px, py))
-			return;
-
-		//convert to integer pixel coordinates
-		int ix = static_cast<int>(px);
-		int iy = static_cast<int>(py);
-
-		//check if pixel is within image bounds
-		if (ix < 0 || ix >= scene->camera.width || iy < 0 || iy >= scene->camera.height)
-			return;
-
-		//distance to camera
-		float distSq = (scene->camera.origin - p).lengthSq();
-		if (distSq < EPSILON)
-			return;
-
-		//check visibility
-		Vec3 camDir = (scene->camera.origin - p).normalize();
-
-		float surfCosTheta = max(0.0f, Dot(camDir, n));
-
-		if (surfCosTheta < EPSILON) 
-			return;
-
-		if (!scene->visible(p + camDir * EPSILON, scene->camera.origin - camDir * EPSILON, ignoreTri))
-			return;
-
-		float camCosTheta = max(0.0f, Dot(-camDir, scene->camera.viewDirection));
-
-		//camera direction should face towards the hit point
-		if (camCosTheta < EPSILON)
-			return;
-
-
-		
-		float pixelArea = 1.0f / (scene->camera.width * scene->camera.height);
-		float sensorFactor = (camCosTheta * surfCosTheta) / distSq;
-
-		int index = iy * scene->camera.width + ix;
-
-		accumulator[index] = accumulator[index] + col * sensorFactor;
-		accumulatorSqr[index] = accumulatorSqr[index] + (col * col) * (sensorFactor * sensorFactor);
-		sampleCount[index] += 1;
-	}
-
-	
-
-	Colour lightTrace(Sampler* sampler)
-	{
-		float pmf;
-		Light* light = scene->sampleLight(sampler, pmf);
-
-		if (!light || pmf < EPSILON)
-			return Colour(0.0f, 0.0f, 0.0f);
-
-		float pdfPosition = 0.0f;
-		float pdfDirection = 0.0f;
-		Vec3 lightPosition;
-		Vec3 lightDirection;
-
-		if (light->isArea())
+		// Compute direct lighting for an image sampler here
+		IntersectionData intersection = scene->traverse(r);
+		ShadingData shadingData = scene->calculateShadingData(intersection, r);
+		if (shadingData.t < FLT_MAX)
 		{
-			lightPosition = light->samplePositionFromLight(sampler, pdfPosition);
-
-	
-			Vec3 toCam = (scene->camera.origin - lightPosition).normalize();
-			Vec3 lightNormal;
-
-			auto* areaLight = static_cast<AreaLight*>(light);
-			lightNormal = areaLight->triangle->gNormal();
-
-			if (Dot(toCam, lightNormal) > 0.1f) 
-			{
-				float blendFactor = 0.7f;  
-
-				if (sampler->next() < blendFactor) 
-				{
-					float r1 = sampler->next() * 0.2f; 
-					float r2 = sampler->next() * 0.2f;
-
-					Vec3 perturbedCamDir = toCam;
-					perturbedCamDir.x += r1 - 0.1f;
-					perturbedCamDir.y += r2 - 0.1f;
-					lightDirection = perturbedCamDir.normalize();
-
-					pdfDirection = 1.0f; 
-				}
-				else 
-				{
-					lightDirection = light->sampleDirectionFromLight(sampler, pdfDirection);
-				}
-			}
-			else 
-			{
-				lightDirection = light->sampleDirectionFromLight(sampler, pdfDirection);
-			}
-		}
-		else
-		{
-		
-			lightDirection = light->sampleDirectionFromLight(sampler, pdfDirection);
-
-			lightPosition = use<SceneBounds>().sceneCentre + (-lightDirection) * use<SceneBounds>().sceneRadius;
-
-			pdfPosition = 1.0f / (4.0f * static_cast<float>(M_PI) * SQ(use<SceneBounds>().sceneRadius));
-		}
-
-		if (pdfPosition < EPSILON || pdfDirection < EPSILON)
-			return Colour(0.0f, 0.0f, 0.0f);
-
-		//start a ray from the light
-		Ray ray(lightPosition + lightDirection * EPSILON, lightDirection);
-
-		Colour Le = light->evaluate(lightDirection);
-
-		if (Le.Lum() < EPSILON)
-			return Colour(0.0f, 0.0f, 0.0f);
-
-		Triangle* ignoreTri = nullptr;
-		Vec3 nLight;
-
-		if (light->isArea())
-		{
-			auto* a = static_cast<AreaLight*>(light);
-			ignoreTri = a->triangle;
-			nLight = a->triangle->gNormal();
-		}
-		else
-		{
-			nLight = -lightDirection;
-		}
-
-		float cosOnLight = max(0.0f, Dot(nLight, lightDirection));
-		if (cosOnLight < EPSILON)
-			return Colour(0.0f, 0.0f, 0.0f);
-
-		Colour pathThroughput = (Le * cosOnLight) / (pmf * pdfPosition * pdfDirection);
-
-		
-
-		connectToCamera(lightPosition, nLight, pathThroughput, ignoreTri);
-
-		int rrStartDepth = 2;
-
-		for (int depth = 0; depth < MAX_DEPTH; depth++)
-		{
-			//intersect the scene
-			IntersectionData isect = scene->traverse(ray);
-			if (isect.t == FLT_MAX)
-			{
-				break;
-			}
-
-			ShadingData shadingData = scene->calculateShadingData(isect, ray);
-
-			//if hit another light, stop
 			if (shadingData.bsdf->isLight())
 			{
-				connectToCamera(shadingData.x, shadingData.sNormal, pathThroughput);
-				break;
+				return shadingData.bsdf->emit(shadingData, shadingData.wo);
 			}
-
-			//connect to camera at each valid intersection
-			Vec3 camPos = scene->camera.origin;
-			Vec3 toCam = (camPos - shadingData.x).normalize();
-			float cosTheta = max(0.0f, Dot(toCam, shadingData.sNormal));
-
-			if (cosTheta > EPSILON)
-			{
-				Colour bsdfVal = shadingData.bsdf->evaluate(shadingData, toCam);
-
-				if (bsdfVal.Lum() > EPSILON)
-				{
-					connectToCamera(shadingData.x, shadingData.sNormal, pathThroughput * bsdfVal);
-				}
-			}
-
-			if (depth >= rrStartDepth)
-			{
-				float rrProb = min(max(pathThroughput.Lum(), 0.1f), 0.95f);
-				if (sampler->next() > rrProb)
-					break;
-
-				pathThroughput = pathThroughput / rrProb;
-			}
-
-			//continue the path with proper sampling
-			float r1 = sampler->next();
-			float r2 = sampler->next();
-
-			//sample new direction in local space
-			Vec3 newDirLocal = SamplingDistributions::cosineSampleHemisphere(r1, r2);
-			float newDirPdf = SamplingDistributions::cosineHemispherePDF(newDirLocal);
-
-			if (newDirPdf < EPSILON)
-				break;
-
-			Vec3 newDirection = shadingData.frame.toWorld(newDirLocal);
-
-			//evaluate BSDF for the new direction
-			Colour bsdfVal = shadingData.bsdf->evaluate(shadingData, newDirection);
-
-			if (bsdfVal.Lum() < EPSILON)
-				break;
-
-			float cosTerm = max(0.0f, Dot(newDirection, shadingData.sNormal));
-
-			pathThroughput = pathThroughput * bsdfVal * cosTerm / newDirPdf;
-
-			//prepare next ray
-			ray.init(shadingData.x + newDirection * EPSILON, newDirection);
+			return computeDirect(shadingData, sampler);
 		}
-		return Colour(1.0f, 1.0f, 1.0f);
-	}
-
-		Colour direct(Ray& r, Sampler* sampler)
-		{
-			// Compute direct lighting for an image sampler here
-			IntersectionData intersection = scene->traverse(r);
-			ShadingData shadingData = scene->calculateShadingData(intersection, r);
-			if (shadingData.t < FLT_MAX)
-			{
-				if (shadingData.bsdf->isLight())
-				{
-					return shadingData.bsdf->emit(shadingData, shadingData.wo);
-				}
-				return computeDirect(shadingData, sampler);
-			}
-			return Colour(0.0f, 0.0f, 0.0f);
+		return Colour(0.0f, 0.0f, 0.0f);
 	}
 	Colour albedo(Ray& r)
 	{
@@ -479,6 +291,412 @@ public:
 			return Colour(fabsf(shadingData.sNormal.x), fabsf(shadingData.sNormal.y), fabsf(shadingData.sNormal.z));
 		}
 		return Colour(0.0f, 0.0f, 0.0f);
+	}
+
+	void connectToCamera(Vec3 p, Vec3 n, Colour col)
+	{
+		float px, py;
+		if (!scene->camera.projectOntoCamera(p, px, py))
+			return;
+
+		if (px < 0.0f || py < 0.0f || px >= (float)scene->camera.width || py >= (float)scene->camera.height)
+			return;
+
+		Vec3 wi = (scene->camera.origin - p).normalize();        
+		Vec3 nCam = (-scene->camera.viewDirection).normalize();  
+		float cosTheta = max(0.0f, Dot(wi, nCam));
+
+		float We = 1.0f / (scene->camera.Afilm * powf(max(1e-6f, cosTheta), 4.0f));
+
+		int ix = (int)px;
+		int iy = (int)py;
+		int index = iy * scene->camera.width + ix;
+
+		const Colour wcol = clampMax(col * We);
+		std::lock_guard<std::mutex> lk(accumMutex);
+		accumulator[index] = accumulator[index] + wcol;
+		accumulatorSqr[index] = accumulatorSqr[index] + (wcol * wcol);
+		sampleCount[index] += 1;
+	}
+
+	//1.sample the light source
+	//2.sample a position from the light
+	//3.sample the direction from  the light
+	//4.get the colour of the light
+	//5.connect to the camera
+	//6.trace the path using the position and the direction
+	//7.recursively trace the path
+	void lightTrace(Sampler* sampler)
+	{
+		float pmf = 0.0f;
+		float pdfPosition = 1.0f;
+		float pdfDirection = 1.0f;
+
+		Light* sourceLight = scene->sampleLight(sampler, pmf);
+		if (!sourceLight || pmf <= EPSILON) return;
+
+		Vec3 position = sourceLight->samplePositionFromLight(sampler, pdfPosition);
+		Vec3 direction = sourceLight->sampleDirectionFromLight(sampler, pdfDirection);
+		if (pdfPosition <= EPSILON || pdfDirection <= EPSILON) return;
+
+		Colour lightColour = sourceLight->evaluate(direction);
+
+		Colour pathThroughput = lightColour / (pmf * pdfPosition * pdfDirection);
+
+		Vec3 wiCam = (scene->camera.origin - position).normalize();
+		const Triangle* ignoreTri =
+			sourceLight->isArea() ? static_cast<AreaLight*>(sourceLight)->triangle : nullptr;
+
+		if (scene->visible(position + wiCam * EPSILON, scene->camera.origin - wiCam * EPSILON, ignoreTri))
+		{
+			connectToCamera(position, direction, pathThroughput);
+		}
+
+		Ray ray(position + direction * EPSILON, direction);
+		lightTracePath(ray, pathThroughput, lightColour, sampler, 0);
+	}
+
+	void lightTracePath(Ray& r, Colour pathThroughput, Colour Le, Sampler* sampler,int depth)
+	{
+		if (depth >= MAX_DEPTH)
+		{
+			return;
+		}
+
+		//trace the ray to find the next intersection
+		IntersectionData intersection = scene->traverse(r);
+		if (intersection.t >= FLT_MAX)
+		{
+			return; //ray left the scene
+		}
+
+		ShadingData shadingData = scene->calculateShadingData(intersection, r);
+
+		//direction from point to camera
+		Vec3 wi = scene->camera.origin - shadingData.x;
+		wi.normalize();
+
+		const Triangle* ignoreTri = intersection.tri;
+
+		if (scene->visible(shadingData.x + wi * EPSILON, scene->camera.origin - wi * EPSILON, ignoreTri))
+		{
+
+			Colour bsdf = shadingData.bsdf->evaluate(shadingData, wi);
+			float cosSurf = max(0.0f, Dot(shadingData.sNormal, wi));
+			Colour col = pathThroughput * bsdf * cosSurf;
+			//Colour col = pathThroughput * bsdf;
+			connectToCamera(shadingData.x, shadingData.sNormal, col);
+		}
+
+		//russian Roulette to terminate the path
+		float russianRouletteProbability = min(pathThroughput.Lum(), 0.9f);
+		if (sampler->next() >= russianRouletteProbability)
+		{
+			return; 
+		}
+		pathThroughput = pathThroughput / russianRouletteProbability;
+
+		//sample a new direction from the BSDF to continue the path
+		Colour bsdfSample;
+		float pdf;
+		Vec3 wiNew= shadingData.bsdf->sample(shadingData, sampler, bsdfSample, pdf);
+
+		//if sampling failed,terminate the path
+		if (pdf < EPSILON || bsdfSample.Lum() < EPSILON)
+		{
+			return;
+		}
+
+		pathThroughput = pathThroughput * bsdfSample * fabsf(Dot(wiNew, shadingData.sNormal)) / pdf;
+
+		r.init(shadingData.x + (wiNew * EPSILON), wiNew);
+
+		lightTracePath(r, pathThroughput, Le, sampler, depth + 1);
+	}
+
+	void traceVPLs(Sampler* sampler, int N_VPLS) 
+	{
+		vpls.clear();
+		vpls.reserve(N_VPLS * 4); 
+
+		for (int i = 0; i < N_VPLS; ++i) 
+		{
+			float pmf = 0.0f, pdfPos = 1.0f, pdfDir = 1.0f;
+			Light* L = scene->sampleLight(sampler, pmf);
+			if (!L || pmf <= EPSILON) continue;
+
+			Vec3  pL = L->samplePositionFromLight(sampler, pdfPos);
+			Vec3  wi0 = L->sampleDirectionFromLight(sampler, pdfDir);
+			if (pdfPos <= EPSILON || pdfDir <= EPSILON) continue;
+
+			//source emission in sampled direction
+			Colour Le0 = L->evaluate(wi0);             
+
+			//initial throughput
+			Colour pathThroughput = Le0 / (pmf * pdfPos * pdfDir * float(N_VPLS));
+
+			if (L->isArea()) 
+			{
+				auto* AL = static_cast<AreaLight*>(L);
+				VPL v;
+				v.shadingData = ShadingData(pL, AL->triangle->n);  //true surface normal
+				v.shadingData.bsdf = nullptr;
+				v.Le = pathThroughput;
+				v.onLight = true;
+				v.tri = AL->triangle;                         
+				vpls.push_back(v);
+			}
+
+			Ray r(pL + wi0 * EPSILON, wi0);
+			VPLTracePath(r, pathThroughput, Le0, sampler, 0);
+		}
+	}
+
+	void VPLTracePath(Ray& r, Colour pathThroughput, Colour Le, Sampler* sampler, int depth) 
+	{
+		if (depth >= MAX_DEPTH) return;
+
+		IntersectionData isect = scene->traverse(r);
+
+		if (isect.t >= FLT_MAX) 
+			return; //left the scene
+
+		ShadingData sd = scene->calculateShadingData(isect, r);   
+
+		//store a VPL at this surface (skip purely specular)
+		if (!sd.bsdf->isPureSpecular()) 
+		{
+			VPL v;
+			v.shadingData = sd;              
+			v.Le = pathThroughput;  //Le_vpl = throughput * Le
+			v.onLight = false;
+			v.tri = isect.tri;
+			vpls.push_back(v);
+		}
+
+		//russian roulette
+		float rr = min(pathThroughput.Lum(), 0.9f);
+		if (sampler->next() >= rr) return;
+		pathThroughput = pathThroughput / rr;
+
+		//sample next direction at the current surface
+		Colour f;
+		float  pdf;
+		Vec3   wi = sd.bsdf->sample(sd, sampler, f, pdf);
+		if (pdf < EPSILON || f.Lum() < EPSILON) return;
+
+		pathThroughput = pathThroughput * f * fabsf(Dot(wi, sd.sNormal)) / pdf;
+		r.init(sd.x + wi * EPSILON, wi);
+		VPLTracePath(r, pathThroughput, Le, sampler, depth + 1);
+	}
+
+	inline float geometryTerm(const Vec3& x, const Vec3& nx,const Vec3& y, const Vec3& ny, bool useNyCos, Vec3& dir_xy) const
+	{
+		dir_xy = (y - x);
+		float l2 = dir_xy.lengthSq();
+		if (l2 < EPSILON) return 0.0f;
+		dir_xy = dir_xy / sqrtf(l2);
+
+		float c1 = max(0.0f, Dot(nx, dir_xy));
+		float g = c1 / l2;
+		if (useNyCos) g *= max(0.0f, Dot(ny, -dir_xy));
+		return g;
+	}
+
+	Colour indirectFromVPLs(const ShadingData& hit) 
+	{
+		Colour L(0.0f, 0.0f, 0.0f);
+
+		for (const VPL& v : vpls) 
+		{
+			Vec3 dir;
+			float G = geometryTerm(hit.x, hit.sNormal, v.shadingData.x,
+				v.onLight ? v.shadingData.sNormal : v.shadingData.sNormal, !v.onLight, dir);
+			if (G <= 0.0f) continue;
+
+			const Triangle* ignore = v.onLight ? v.tri : nullptr;
+
+			if (!scene->visible(hit.x + dir * EPSILON, v.shadingData.x - dir * EPSILON, ignore))
+				continue; //shadowed
+
+			Colour f_x = hit.bsdf->evaluate(hit, dir);
+
+			if (v.onLight) 
+			{
+				L = L + clampMax(f_x * v.Le * G);
+			}
+			else 
+			{
+				Colour f_v = v.shadingData.bsdf->evaluate(v.shadingData, -dir);
+				L = L + clampMax(f_x * f_v * v.Le * G);
+			}
+		}
+		return L;
+	}
+
+	void renderInstantRadiosity()
+	{
+		film->incrementSPP();
+		const int W = scene->camera.width, H = scene->camera.height;
+
+		const int N_VPLS = 4096;                 
+		MTRandom samplerForVPLs(1337);
+		traceVPLs(&samplerForVPLs, N_VPLS);
+
+		int tileSize = 32, tilesX = (W + tileSize - 1) / tileSize, tilesY = (H + tileSize - 1) / tileSize;
+		std::queue<int> tileQueue; std::mutex queueMutex; std::condition_variable queueCV;
+		std::vector<Tile> tiles; tiles.reserve(tilesX * tilesY);
+		for (int ty = 0; ty < tilesY; ++ty) for (int tx = 0; tx < tilesX; ++tx) tiles.push_back({ tx * tileSize, ty * tileSize, tileSize, tileSize });
+		for (int i = 0; i < (int)tiles.size(); ++i) tileQueue.push(i);
+		std::atomic<bool> stop(false);
+
+		auto worker = [&](int threadIndex)
+			{
+				MTRandom* s = &samplers[threadIndex];
+				while (true) 
+				{
+					int idx = -1;
+					{
+						std::unique_lock<std::mutex> lk(queueMutex);
+						if (tileQueue.empty()) break;
+						idx = tileQueue.front(); tileQueue.pop();
+					}
+
+					Tile t = tiles[idx];
+					for (int y = t.startY; y < min(H, t.startY + t.height); ++y) 
+					{
+						for (int x = t.startX; x < min(W, t.startX + t.width); ++x) 
+						{
+							float px = x + s->next(), py = y + s->next();
+							Ray   r = scene->camera.generateRay(px, py);                 
+							ShadingData sd;
+							Colour C(0, 0, 0);
+
+							if (firstNonSpecularHit(r, s, sd)) 
+							{
+								//direct lighting from real lights (your existing routine)
+								Colour Ld = computeDirect(sd, s);                           
+								//indirect from all VPLs
+								Colour Li = indirectFromVPLs(sd);
+								C = Ld + Li;
+							}
+							else 
+							{
+								C = scene->background->evaluate(r.dir);
+							}
+
+							int index = y * W + x;
+							accumulator[index] = accumulator[index] + C;
+							accumulatorSqr[index] = accumulatorSqr[index] + (C * C);
+							sampleCount[index] += 1;
+						}
+					}
+				}
+			};
+
+		int nThreads = std::thread::hardware_concurrency();
+		std::vector<std::thread> threads;
+		for (int i = 0; i < nThreads; i++) threads.emplace_back(worker, i);
+		for (auto& t : threads) t.join();
+
+		//write out to film and canvas (identical to the end of your renderers)
+		for (int y = 0; y < H; ++y) 
+		{
+			for (int x = 0; x < W; ++x) 
+			{
+				int idx = y * W + x, n = sampleCount[idx];
+				if (n > 0) 
+				{
+					Colour avg = accumulator[idx] / float(n);
+					film->splat(x + 0.5f, y + 0.5f, avg);
+					unsigned char r, g, b; film->tonemap(x, y, r, g, b, 1, n);
+					canvas->draw(x, y, r, g, b);
+				}
+			}
+		}
+	}
+
+
+	void renderLightTracing()
+	{
+		film->clear();
+
+		std::fill(accumulator.begin(), accumulator.end(), Colour(0.0f, 0.0f, 0.0f));
+		std::fill(accumulatorSqr.begin(), accumulatorSqr.end(), Colour(0.0f, 0.0f, 0.0f));
+		std::fill(sampleCount.begin(), sampleCount.end(), 0);
+
+		film->incrementSPP();
+
+		int basePaths = 10000000;
+		float resolutionFactor = sqrt((float)(scene->camera.width * scene->camera.height)) / 50.0f;
+		int numLightPaths = (int)(basePaths * resolutionFactor);
+		numLightPaths = min(numLightPaths, 10000000);
+		lastNumLightPaths = numLightPaths;
+
+		float exposureFactor = 3.0f;
+
+		int numThreads = std::thread::hardware_concurrency();
+		std::vector<std::thread> threads;
+		threads.reserve(numThreads);
+
+		int pathsPerThread = numLightPaths / numThreads;
+
+
+
+		auto traceFunc = [&](int threadIndex, int numPaths)
+			{
+				MTRandom* sampler = &samplers[threadIndex];
+				for (int i = 0; i < numPaths; i++)
+				{
+					lightTrace(sampler);
+				}
+			};
+
+		//launch threads
+		for (int i = 0; i < numThreads; i++)
+		{
+			int pathCount = (i == numThreads - 1) ?
+				numLightPaths - (pathsPerThread * (numThreads - 1)) : pathsPerThread;
+			threads.emplace_back(traceFunc, i, pathCount);
+		}
+
+		//wait for all threads to complete
+		for (auto& t : threads)
+		{
+			t.join();
+		}
+
+
+		int imageWidth = scene->camera.width;
+		int imageHeight = scene->camera.height;
+
+
+		for (int y = 0; y < imageHeight; ++y)
+		{
+			for (int x = 0; x < imageWidth; ++x)
+			{
+				int index = y * imageWidth + x;
+				const int n = sampleCount[index];
+
+				if (lastNumLightPaths > 0)
+				{
+					Colour avg = (accumulator[index] / float(n)) * exposureFactor;
+
+					film->splat(x + 0.5f, y + 0.5f, avg);
+
+					unsigned char r, g, b;
+					film->tonemap(x, y, r, g, b, 1.0f, n);
+					canvas->draw(x, y, r, g, b);
+				}
+				else
+				{
+
+					canvas->draw(x, y, 0, 0, 0);
+				}
+
+
+			}
+		}
 	}
 
 
@@ -582,9 +800,7 @@ public:
 
 								Ray ray = scene->camera.generateRay(px, py);
 								Colour throughput(1.0f, 1.0f, 1.0f);
-								//Colour sampleColour = pathTrace(ray, throughput, 0, sampler);
 								Colour sampleColour = pathTrace(ray, throughput, 0, sampler);
-								//Colour sampleColour = direct(ray, sampler);
 								tileAccum = tileAccum + sampleColour;
 
 								
@@ -731,90 +947,6 @@ public:
 		}
 	}
 
-	void renderLightTracing()
-	{
-	
-		film->clear();
-
-		std::fill(accumulator.begin(), accumulator.end(), Colour(0.0f, 0.0f, 0.0f));
-		std::fill(accumulatorSqr.begin(), accumulatorSqr.end(), Colour(0.0f, 0.0f, 0.0f));
-		std::fill(sampleCount.begin(), sampleCount.end(), 0);
-
-		film->incrementSPP();
-
-		//number of light paths to trace - should match the resolution
-		//int numLightPaths = scene->camera.width * scene->camera.height * 16; 
-
-		int basePaths = 10000000; 
-		float resolutionFactor = sqrt((float)(scene->camera.width * scene->camera.height)) / 50.0f;
-		int numLightPaths = (int)(basePaths * resolutionFactor);
-		numLightPaths = min(numLightPaths, 10000000);
-
-		float exposureFactor = 3.0f;
-
-		int numThreads = std::thread::hardware_concurrency();
-		std::vector<std::thread> threads;
-		threads.reserve(numThreads);
-
-		int pathsPerThread = numLightPaths / numThreads;
-
-
-
-		auto traceFunc = [&](int threadIndex, int numPaths) 
-			{
-				MTRandom* sampler = &samplers[threadIndex];
-				for (int i = 0; i < numPaths; i++) 
-				{
-					lightTrace(sampler);
-				}
-			};
-
-		//launch threads
-		for (int i = 0; i < numThreads; i++) 
-		{
-			int pathCount = (i == numThreads - 1) ?
-				numLightPaths - (pathsPerThread * (numThreads - 1)) : pathsPerThread;
-			threads.emplace_back(traceFunc, i, pathCount);
-		}
-
-		//wait for all threads to complete
-		for (auto& t : threads) 
-		{
-			t.join();
-		}
-
-
-		int imageWidth = scene->camera.width;
-		int imageHeight = scene->camera.height;
-
-
-		for (int y = 0; y < imageHeight; ++y) 
-		{
-			for (int x = 0; x < imageWidth; ++x) 
-			{
-				int index = y * imageWidth + x;
-				int n = sampleCount[index];
-
-				if (n > 0)
-				{
-					Colour avg = (accumulator[index] / float(n)) * exposureFactor;
-
-					film->splat(x + 0.5f, y + 0.5f, avg);
-
-					unsigned char r, g, b;
-					film->tonemap(x, y, r, g, b, 1.0f, 1);
-					canvas->draw(x, y, r, g, b);
-				}
-				else
-				{
-
-					canvas->draw(x, y, 0, 0, 0);
-				}
-
-			
-			}
-		}
-	}
 
 
 	void denoise()
@@ -862,10 +994,6 @@ public:
 				Colour c(r, g, b);
 				film->splat(x + 0.5f, y + 0.5f, c);
 
-				/*unsigned char r1 = (unsigned char)(min(1.0f, r1) * 255);
-				unsigned char g1 = (unsigned char)(min(1.0f, g1) * 255);
-				unsigned char b1 = (unsigned char)(min(1.0f, b1) * 255);
-				canvas->draw(x, y, r1, g1, b1);*/
 				unsigned char r1, g1, b1;
 				int n = sampleCount[index];
 				film->tonemap(x, y, r1, g1, b1, 1, n);

@@ -4,6 +4,8 @@
 #include "Geometry.h"
 #include "Materials.h"
 #include "Sampling.h"
+#include <algorithm>
+#include <numeric>
 
 #pragma warning( disable : 4244)
 
@@ -145,7 +147,8 @@ public:
 		Vec3 p = SamplingDistributions::uniformSampleSphere(sampler->next(), sampler->next());
 		p = p * use<SceneBounds>().sceneRadius;
 		p = p + use<SceneBounds>().sceneCentre;
-		pdf = 4 * M_PI * use<SceneBounds>().sceneRadius * use<SceneBounds>().sceneRadius;
+        //pdf = 4 * M_PI * use<SceneBounds>().sceneRadius * use<SceneBounds>().sceneRadius;
+		pdf = 1/(4 * M_PI * SQ(use<SceneBounds>().sceneRadius));
 		return p;
 	}
 	Vec3 sampleDirectionFromLight(Sampler* sampler, float& pdf)
@@ -162,8 +165,12 @@ public:
     Texture* env;
     int width;
     int height;
-    std::vector<float> pdf;
-    std::vector<float>cdf;
+
+    std::vector<float> rowPdf;   // size = height
+    std::vector<float> rowCdf;   // size = height
+
+    std::vector<float> colPdf;   // size = width * height
+    std::vector<float> colCdf;   // size = width * height
 
     float normalizationFactor;
 
@@ -173,149 +180,182 @@ public:
         width = env->width;
         height = env->height;
 
-        pdf.resize(width * height);
-        cdf.resize(width * height);
+        rowPdf.resize(height);
+        rowCdf.resize(height);
+        colPdf.resize(width * height);
+        colCdf.resize(width * height);
 
-        float sum = 0.0f;
+        buildDistributions();
 
-        for (int j = 0; j < height; j++)
-        {
-            float theta = (float(j) + 0.5f) * M_PI / float(height);
-            float sinTheta = sinf(theta);
-
-            for (int i = 0; i < width; i++)
-            {
-                //luminance of pixel (i,j)
-                float L = env->texels[j * width + i].Lum();
-
-                float p = L * sinTheta;
-                pdf[j * width + i] = p;
-                sum += p;
-            }
-        }
-
-        if (sum < EPSILON)
-        {
-            sum = 1.0f;
-            //initialize with uniform distribution if sum is too small
-            for (int k = 0; k < width * height; k++)
-            {
-                pdf[k] = 1.0f / (width * height);
-            }
-        }
-        else
-        {
-            //normalize PDFs
-            float invSum = 1.0f / sum;
-            for (int k = 0; k < width * height; k++)
-            {
-                pdf[k] *= invSum;
-            }
-        }
-
-		//compute CDF
-        cdf[0] = pdf[0];
-        for (int k = 1; k < width * height; k++)
-        {
-            cdf[k] = cdf[k - 1] + pdf[k];
-        }
-
-        //make sure the last CDF value is exactly 1
-        if (cdf[width * height - 1] > 0)
-        {
-            float invLastCDF = 1.0f / cdf[width * height - 1];
-            for (int k = 0; k < width * height; k++)
-            {
-                cdf[k] *= invLastCDF;
-            }
-        }
-
-        //store normalization factor for PDF calculation
-        normalizationFactor = float(width * height) / (2.0f * M_PI * M_PI);
-        //normalizationFactor = 1.0f / (2.0f * M_PI * M_PI);
     }
-    Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& reflectedColour, float& pdf)
+
+    inline int Idx(int j, int i) const 
+    { 
+        return j * width + i; 
+    
+    }
+
+    template <typename T>
+    static inline T clamp(T v, T lo, T hi) 
+    { 
+        return v < lo ? lo : (v > hi ? hi : v); 
+    }
+
+    static inline void dirToUv(const Vec3& wi, float& u, float& v, float& theta, float& phi)
+    {
+        //y-up latitude/longitude
+        phi = atan2f(wi.z, wi.x);
+        if (phi < 0.0f) phi += 2.0f * M_PI;
+        theta = acosf(clamp(wi.y, -1.0f, 1.0f));
+        u = phi / (2.0f * M_PI);
+        v = theta / M_PI;
+    }
+
+    static inline Vec3 uvToDir(float u, float v)
+    {
+        float phi = 2.0f * M_PI * u;
+        float theta = M_PI * v;
+        float sT = sinf(theta);
+        Vec3 wi;
+        wi.x = sT * cosf(phi);
+        wi.y = cosf(theta);
+        wi.z = sT * sinf(phi);
+        return wi;
+    }
+
+    void buildDistributions()
+    {
+        if (width == 0 || height == 0) return;
+
+        //marginal over rows
+        std::vector<float> rowWeight(height, 0.0f);
+
+        for (int j = 0; j < height; ++j)
+        {
+            //theta at row center
+            float theta = (float(j) + 0.5f) * (float)M_PI / float(height);
+            float sT = sinf(theta);
+
+            //sum luminance over row j
+            float sumRowL = 0.0f;
+            for (int i = 0; i < width; ++i)
+                sumRowL += env->texels[Idx(j, i)].Lum();
+
+            //marginal weight
+            rowWeight[j] = sT * sumRowL;
+        }
+
+        //normalise rowPdf (fallback to uniform if total is 0)
+        float totalRow = std::accumulate(rowWeight.begin(), rowWeight.end(), 0.0f);
+        if (totalRow <= 0.0f) 
+            totalRow = 1.0f;
+
+        for (int j = 0; j < height; ++j)
+            rowPdf[j] = rowWeight[j] / totalRow;
+
+        //row CDF
+        float acc = 0.0f;
+        for (int j = 0; j < height; ++j) 
+        {
+            acc += rowPdf[j];
+            rowCdf[j] = acc;
+        }
+
+        if (rowCdf.back() > 0.0f) 
+        {
+            float invLast = 1.0f / rowCdf.back();
+            for (float& x : rowCdf) x *= invLast;
+        }
+
+        //conditional over columns per row (L / sumRowL)
+        for (int j = 0; j < height; ++j)
+        {
+            //sum luminance on row j
+            float sumRowL = 0.0f;
+            for (int i = 0; i < width; ++i)
+                sumRowL += env->texels[Idx(j, i)].Lum();
+
+            if (sumRowL <= 0.0f) sumRowL = 1.0f; //uniform fallback on empty rows
+
+            //normalised per-row pdf and cdf
+            float rowAcc = 0.0f;
+            for (int i = 0; i < width; ++i)
+            {
+                float lij = env->texels[Idx(j, i)].Lum();
+                colPdf[Idx(j, i)] = lij / sumRowL;
+
+                rowAcc += colPdf[Idx(j, i)];
+                colCdf[Idx(j, i)] = rowAcc;
+            }
+
+            //normalise CDF of row j to exactly 1
+            float last = colCdf[Idx(j, width - 1)];
+            if (last > 0.0f)
+            {
+                float inv = 1.0f / last;
+                for (int i = 0; i < width; ++i)
+                    colCdf[Idx(j, i)] *= inv;
+            }
+        }
+    }
+
+
+
+    Vec3 sample(const ShadingData& shadingData, Sampler* sampler, Colour& emittedColour, float& pdf)
     {
         // Assignment: Update this code to importance sampling lighting based on luminance of each pixel
-        float r = sampler->next();
+        //sample row (v) from marginal CDF
+        float r1 = sampler->next();
+        int j = int(std::lower_bound(rowCdf.begin(), rowCdf.end(), r1) - rowCdf.begin());
+        j = clamp(j, 0, height - 1);
 
-        int idx = int(std::lower_bound(cdf.begin(), cdf.end(), r) - cdf.begin());
-        idx = std::min(idx, width * height - 1);
-
-        int j = idx / width;     // row
-        int i = idx % width;     // column
+        //sample column (u) from conditional CDF of the chosen row
+        float r2 = sampler->next();
+        const float* cdfRow = &colCdf[Idx(j, 0)];
+        int i = int(std::lower_bound(cdfRow, cdfRow + width, r2) - cdfRow);
+        i = clamp(i, 0, width - 1);
 
         float u = (i + sampler->next()) / float(width);
         float v = (j + sampler->next()) / float(height);
 
-        float phi = 2.0f * M_PI * u;
+        Vec3 wi = uvToDir(u, v);
+        emittedColour = env->sample(u, v);
+
         float theta = M_PI * v;
+        float sT = sinf(theta);
+        sT = (sT < 1e-4f) ? 1e-4f : sT;
 
-        float sinTheta = sinf(theta);
-        Vec3 wi;
-        wi.x = sinTheta * cosf(phi);
-        wi.y = cosf(theta);
-        wi.z = sinTheta * sinf(phi);
+        //probability of choosing pixel (i,j)
+        float Pij = rowPdf[j] * colPdf[Idx(j, i)];
+        float p_uv = Pij * float(width * height);           
+        pdf = p_uv / (2.0f * float(M_PI) * float(M_PI) * sT);
 
-        reflectedColour = env->sample(u, v);
-
-        pdf = PDF(shadingData, wi);
-
-        if (pdf < EPSILON) 
-            pdf = EPSILON;
-
+        if (pdf < EPSILON) pdf = EPSILON;
         return wi;
-
-        /*Vec3 wi = SamplingDistributions::uniformSampleSphere(sampler->next(), sampler->next());
-        pdf = SamplingDistributions::uniformSpherePDF(wi);
-        reflectedColour = evaluate(shadingData, wi);
-        return wi;*/
     }
 
-    template <typename T>
-    T clamp(T value, T min, T max) 
-    {
-        return value < min ? min : (value > max ? max : value);
-    }
 
     Colour evaluate(const Vec3& wi)
     {
-        //convert direction to environment map coordinates
-        float phi = atan2f(wi.z, wi.x);
-        if (phi < 0.0f)
-            phi += 2.0f * M_PI;
-
-        float theta = acosf(clamp(wi.y, -1.0f, 1.0f));
-
-        float u = phi / (2.0f * M_PI);
-        float v = theta / M_PI;
-
+        float u, v, theta, phi;
+        dirToUv(wi, u, v, theta, phi);
         return env->sample(u, v);
     }
     float PDF(const ShadingData& shadingData, const Vec3& wi, const Vec3& targetPos = Vec3())
     {
         // Assignment: Update this code to return the correct PDF of luminance weighted importance sampling
-        float phi = atan2f(wi.z, wi.x);
-        if (phi < 0.0f)
-            phi += 2.0f * M_PI;
+        float u, v, theta, phi;
+        dirToUv(wi, u, v, theta, phi);
 
-        float theta = acosf(clamp(wi.y, -1.0f, 1.0f));
+        int i = clamp(int(u * width), 0, width - 1);
+        int j = clamp(int(v * height), 0, height - 1);
 
-        float u = phi / (2.0f * M_PI);
-        float v = theta / M_PI;
+        float sT = sinf(theta);
+        sT = (sT < 1e-4f) ? 1e-4f : sT;
 
-        //compute pixel indices
-        int i = std::min(std::max(int(u * width), 0), (width - 1));
-        int j = std::min(std::max(int(v * height), 0), (height - 1));
-
-        float p_ij = pdf[j * width + i];
-
-        float sinTheta = sinf(theta);
-
-        if (sinTheta < 1e-4f)
-            sinTheta = 1e-4f;
-
-        return p_ij * normalizationFactor / sinTheta;
+        float Pij = rowPdf[j] * colPdf[Idx(j, i)];
+        float p_uv = Pij * float(width * height);
+        return p_uv / (2.0f * float(M_PI) * float(M_PI) * sT);
         //return SamplingDistributions::uniformSpherePDF(wi);
     }
     bool isArea()
@@ -328,20 +368,16 @@ public:
     }
     float totalIntegratedPower()
     {
-        float total = 0;
-        float dTheta = M_PI / height;
-        float dPhi = 2.0f * M_PI / width;
-        float texelArea = dTheta * dPhi;
+        float total = 0.0f;
+        float dTheta = float(M_PI) / float(height);
+        float dPhi = 2.0f * float(M_PI) / float(width);
 
-        for (int j = 0; j < height; j++)
+        for (int j = 0; j < height; ++j) 
         {
-            float theta = (j + 0.5f) * M_PI / height;
-            float sinTheta = sinf(theta);
-            for (int i = 0; i < width; i++)
-            {
-                float L = env->texels[j * width + i].Lum();
-                total += L * sinTheta * texelArea;
-            }
+            float theta = (j + 0.5f) * dTheta;
+            float sT = sinf(theta);
+            for (int i = 0; i < width; ++i)
+                total += env->texels[Idx(j, i)].Lum() * sT * (dTheta * dPhi);
         }
         return total;
     }
@@ -355,36 +391,8 @@ public:
     }
     Vec3 sampleDirectionFromLight(Sampler* sampler, float& pdf)
     {
-        // Replace this tabulated sampling of environment maps
-        float r = sampler->next();
-
-        int idx = int(std::lower_bound(cdf.begin(), cdf.end(), r) - cdf.begin());
-        idx = std::min(idx, width * height - 1);
-
-        int j = idx / width;
-        int i = idx % width;
-
-        //convert to spherical coordinates 
-        float u = (i + sampler->next()) / float(width);
-        float v = (j + sampler->next()) / float(height);
-
-        float phi = 2.0f * M_PI * u;
-        float theta = M_PI * v;
-
-        float sinTheta = sinf(theta);
-
-        Vec3 wi;
-        wi.x = sinTheta * cosf(phi);
-        wi.y = cosf(theta);
-        wi.z = sinTheta * sinf(phi);
-
-
-        pdf = PDF(ShadingData(), wi);
-        
-        if (pdf < EPSILON) 
-            pdf = EPSILON;
-
-        return wi;
+        Colour dummy;
+        return sample(ShadingData(), sampler, dummy, pdf);
     }
 
 };

@@ -106,10 +106,11 @@ int main(int argc, char *argv[])
 			viewcamera.flyDown();
 			rt.clear();
 		}
-		// Time how long a render call takes
+		//Time how long a render call takes
 		timer.reset();
 		rt.renderPathTracing();
 		//rt.renderLightTracing();
+		//rt.renderInstantRadiosity();
 		rt.denoise();
 
 		float t = timer.dt();

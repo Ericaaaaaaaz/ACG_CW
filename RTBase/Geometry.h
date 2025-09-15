@@ -276,6 +276,7 @@ struct IntersectionData
 	float alpha;
 	float beta;
 	float gamma;
+	const Triangle* tri = nullptr;
 };
 
 #define MAXNODE_TRIANGLES 8
@@ -526,6 +527,7 @@ public:
 						intersection.beta = u;
 						intersection.gamma = v;
 						intersection.ID = i;
+						intersection.tri = &triangles[i];
 					}
 				}
 			}
@@ -544,6 +546,7 @@ public:
 		intersection.t = FLT_MAX;
 		intersection.ID = 0;
 		intersection.alpha = intersection.beta = intersection.gamma = 0.0f;
+		intersection.tri = nullptr;
 		traverse(ray, triangles, intersection);
 		return intersection;
 	}
